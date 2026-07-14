@@ -43,6 +43,13 @@ class QdrantVectorStore:
                 ),
             )
 
+    def delete(self, memory_id: str) -> None:
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=models.PointIdsList(points=[memory_id]),
+            wait=True,
+        )
+
     def upsert(self, document: MemoryDocument, vector: list[float]) -> None:
         if len(vector) != self.vector_size:
             raise ValueError(f"Expected vector size {self.vector_size}, got {len(vector)}")
@@ -60,6 +67,22 @@ class QdrantVectorStore:
             ],
             wait=True,
         )
+
+    def batch_upsert(self, documents: list[MemoryDocument], vectors: list[list[float]]) -> None:
+        """Upsert multiple documents in a single Qdrant API call."""
+        if len(documents) != len(vectors):
+            raise ValueError(f"Document count ({len(documents)}) does not match vector count ({len(vectors)})")
+        validated: list[models.PointStruct] = []
+        for doc, vec in zip(documents, vectors):
+            if len(vec) != self.vector_size:
+                raise ValueError(f"Expected vector size {self.vector_size}, got {len(vec)}")
+            if doc.kind == "episodic" and not doc.verified:
+                raise ValueError("Episodic memory must pass verification before it can be stored")
+            validated.append(
+                models.PointStruct(id=doc.memory_id, vector=vec, payload=doc.model_dump(mode="json"))
+            )
+        self.ensure_collection()
+        self.client.upsert(collection_name=self.collection_name, points=validated, wait=True)
 
     def search(
         self,

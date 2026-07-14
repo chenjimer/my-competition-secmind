@@ -89,6 +89,8 @@ class PlanStep(BaseModel):
 
 
 class BudgetState(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     max_steps: int = 12
     max_tool_calls: int = 12
     max_model_calls: int = 20
@@ -131,6 +133,8 @@ class Finding(BaseModel):
 
 
 class DecisionRecord(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     decision: str
     rationale_summary: str
     evidence_ids: list[str] = Field(default_factory=list)
@@ -232,6 +236,7 @@ class AgentState(BaseModel):
     report: AgentReport | None = None
     last_error: str | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    knowledge_hits: list[KnowledgeHit] = Field(default_factory=list)
 
 
 class LedgerEvent(BaseModel):

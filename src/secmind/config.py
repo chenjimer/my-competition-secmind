@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v3"
     qdrant_url: str = "http://qdrant:6333"
     qdrant_collection: str = "secmind_knowledge"
+    qdrant_vector_size: int = Field(default=1024, ge=64, le=4096)
     model_timeout_seconds: float = 45.0
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)

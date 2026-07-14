@@ -21,6 +21,7 @@ from secmind.guardrail import GuardrailAction
 from secmind.ingest import IngestError, InputIngestor
 from secmind.ledger import LedgerStore
 from secmind.llm import QwenGateway
+from secmind.memory import QdrantVectorStore
 from secmind.schemas import (
     AgentState,
     ApprovalDecision,
@@ -52,6 +53,7 @@ class SecMindOrchestrator:
         gateway: QwenGateway,
         broker: ToolBroker,
         publisher: Publisher | None = None,
+        memory_store: QdrantVectorStore | None = None,
     ) -> None:
         self.settings = settings
         self.ledger = ledger
@@ -64,6 +66,7 @@ class SecMindOrchestrator:
         self.analyst = AnalystAgent(gateway)
         self.verifier = VerifierAgent(gateway)
         self.reporter = ReporterAgent(gateway)
+        self.memory_store = memory_store
         self.checkpointer = InMemorySaver()
         self.graph = self._build_graph().compile(checkpointer=self.checkpointer)
 
@@ -242,15 +245,56 @@ class SecMindOrchestrator:
 
     async def _retrieve_context(self, value: GraphState) -> GraphState:
         state = self._state(value)
-        state.decisions.append(
-            DecisionRecord(
-                decision="knowledge_context_empty",
-                rationale_summary="No external knowledge was required for the deterministic Bandit baseline.",
-                policy_ids=["RAG-CITATION-V1"],
-                model_id="deterministic-retriever",
+        hit_count = 0
+
+        if self.memory_store is not None:
+            query_parts = [state.task.objective]
+            if state.scenario:
+                query_parts.append(str(state.scenario))
+            if state.task.target_scope:
+                query_parts.append(", ".join(state.task.target_scope))
+            query_text = " ".join(query_parts)
+
+            try:
+                if not self.settings.demo_mode and self.settings.qwen_api_key:
+                    vectors = await self.gateway.embeddings([query_text])
+                    query_vector = vectors[0]
+                else:
+                    import random
+                    query_vector = [random.random() for _ in range(self.memory_store.vector_size)]
+
+                hits = self.memory_store.search(query_vector, top_k=5)
+                state.knowledge_hits = hits
+                hit_count = len(hits)
+
+                state.decisions.append(
+                    DecisionRecord(
+                        decision="knowledge_retrieved",
+                        rationale_summary=f"Retrieved {hit_count} ATT&CK knowledge entries for: {query_text[:80]}",
+                        policy_ids=["RAG-CITATION-V1"],
+                        model_id="deterministic-retriever",
+                    )
+                )
+            except Exception as exc:
+                state.decisions.append(
+                    DecisionRecord(
+                        decision="knowledge_retrieval_failed",
+                        rationale_summary=f"Knowledge retrieval error: {exc}",
+                        policy_ids=["RAG-CITATION-V1"],
+                        model_id="deterministic-retriever",
+                    )
+                )
+        else:
+            state.decisions.append(
+                DecisionRecord(
+                    decision="knowledge_context_empty",
+                    rationale_summary="No external knowledge was required for the deterministic Bandit baseline.",
+                    policy_ids=["RAG-CITATION-V1"],
+                    model_id="deterministic-retriever",
+                )
             )
-        )
-        return await self._checkpoint(state, "knowledge.retrieved", {"hit_count": 0})
+
+        return await self._checkpoint(state, "knowledge.retrieved", {"hit_count": hit_count})
 
     async def _plan(self, value: GraphState) -> GraphState:
         state = self._state(value)

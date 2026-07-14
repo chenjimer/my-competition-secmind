@@ -14,6 +14,7 @@ from secmind.config import Settings, get_settings
 from secmind.guardrail import Guardrail
 from secmind.ledger import LedgerStore
 from secmind.llm import QwenGateway, close_gateway_safely
+from secmind.memory import QdrantVectorStore
 from secmind.orchestrator import SecMindOrchestrator
 from secmind.schemas import ApprovalResponse, RunStatus, TaskRequest
 from secmind.service import EventHub, RunService
@@ -26,7 +27,15 @@ def build_runtime(settings: Settings) -> tuple[RunService, QwenGateway]:
     hub = EventHub()
     gateway = QwenGateway(settings)
     broker = ToolBroker(default_registry(), Guardrail())
-    orchestrator = SecMindOrchestrator(settings, ledger, gateway, broker, hub.publish)
+    qdrant_url = settings.qdrant_url.replace("qdrant:6333", "localhost:6333")
+    memory_store = QdrantVectorStore(
+        url=qdrant_url,
+        collection_name=settings.qdrant_collection,
+        vector_size=settings.qdrant_vector_size,
+    )
+    orchestrator = SecMindOrchestrator(
+        settings, ledger, gateway, broker, hub.publish, memory_store=memory_store
+    )
     return RunService(orchestrator, ledger, hub), gateway
 
 
