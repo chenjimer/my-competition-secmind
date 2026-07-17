@@ -73,40 +73,25 @@ class PlannerAgent(BaseAgent):
     model_role = "planner"
 
     async def run(self, state: AgentState) -> AgentState:
-        if state.scenario != Scenario.CODE_AUDIT:
+        default = self._create_default_plan(state)
+
+        if default is None:
             state.plan = []
             state.decisions.append(
                 DecisionRecord(
                     decision="no_supported_plan",
-                    rationale_summary="Only the code-audit scenario is enabled in the first executable baseline.",
-                    policy_ids=["SCOPE-MVP-CODE-AUDIT"],
+                    rationale_summary="Scenario not yet supported.",
+                    policy_ids=["SCOPE-CURRENT"],
                     model_id="deterministic-planner",
                     prompt_version=self.prompt_version,
                 )
             )
             return state
-        default = PlanOutput(
-            steps=[
-                PlanStep(
-                    step_id="audit-python-bandit",
-                    objective="Scan the controlled workspace for Python security weaknesses.",
-                    agent_role="executor",
-                    tool_candidates=["bandit_python_audit"],
-                    inputs={"target": "."},
-                    success_criteria=[
-                        "Bandit returns a valid structured result",
-                        "Every reported finding has an evidence reference",
-                    ],
-                    risk_hint=RiskLevel.R1,
-                    max_attempts=2,
-                )
-            ],
-            rationale_summary="Static, read-only analysis is the safest reproducible first strategy.",
-        )
+
         if not self.gateway.settings.demo_mode:
             prompt = (
-                "Create a bounded code-audit plan. Only use the tool bandit_python_audit. "
-                "Do not include hidden reasoning; provide a short rationale summary.\n"
+                f"Create a bounded {state.scenario.value} plan. "
+                f"Do not include hidden reasoning; provide a short rationale summary.\n"
                 f"Objective: {state.task.objective}\n"
                 f"Inputs: {[item.relative_path for item in state.input_artifacts]}"
             )
@@ -121,7 +106,7 @@ class PlannerAgent(BaseAgent):
                 state.budget.model_calls_used += 1
                 default = output
                 model_id = meta.model_id
-            except Exception as exc:  # deterministic degradation is intentional
+            except Exception as exc:
                 model_id = "deterministic-planner-fallback"
                 state.last_error = f"Planner model degraded safely: {type(exc).__name__}"
         else:
@@ -137,6 +122,82 @@ class PlannerAgent(BaseAgent):
             )
         )
         return state
+
+    def _create_default_plan(self, state: AgentState) -> PlanOutput | None:
+        if state.scenario == Scenario.CODE_AUDIT:
+            return PlanOutput(
+                steps=[
+                    PlanStep(
+                        step_id="audit-python-bandit",
+                        objective="Scan the controlled workspace for Python security weaknesses.",
+                        agent_role="executor",
+                        tool_candidates=["bandit_python_audit"],
+                        inputs={"target": "."},
+                        success_criteria=[
+                            "Bandit returns a valid structured result",
+                            "Every reported finding has an evidence reference",
+                        ],
+                        risk_hint=RiskLevel.R1,
+                        max_attempts=2,
+                    )
+                ],
+                rationale_summary="Static, read-only analysis is the safest reproducible first strategy.",
+            )
+
+        if state.scenario == Scenario.PENETRATION_TEST:
+            return PlanOutput(
+                steps=[
+                    PlanStep(
+                        step_id="pentest-recon",
+                        objective="Discover open ports and services on the target.",
+                        agent_role="executor",
+                        tool_candidates=["nmap_scan", "whatweb_identify"],
+                        inputs={"target": "."},
+                        success_criteria=[
+                            "Nmap scan produces a structured result",
+                            "At least one open port or service is identified",
+                        ],
+                        risk_hint=RiskLevel.R2,
+                        max_attempts=2,
+                    ),
+                    PlanStep(
+                        step_id="pentest-enumerate",
+                        objective="Enumerate web directories and known vulnerabilities.",
+                        agent_role="executor",
+                        tool_candidates=["gobuster_dir", "nuclei_scan"],
+                        inputs={},
+                        success_criteria=[
+                            "Directory enumeration completes successfully",
+                            "Nuclei scan identifies potential vulnerabilities",
+                        ],
+                        risk_hint=RiskLevel.R2,
+                        max_attempts=2,
+                    ),
+                ],
+                rationale_summary="Reconnaissance first, then targeted enumeration based on findings.",
+            )
+
+        if state.scenario == Scenario.LOG_ANALYSIS:
+            return PlanOutput(
+                steps=[
+                    PlanStep(
+                        step_id="log-inspect",
+                        objective="Analyze log files for suspicious patterns and anomalies.",
+                        agent_role="executor",
+                        tool_candidates=[],
+                        inputs={"target": "."},
+                        success_criteria=[
+                            "Log entries are parsed and categorized",
+                            "Anomalous patterns are identified",
+                        ],
+                        risk_hint=RiskLevel.R1,
+                        max_attempts=2,
+                    ),
+                ],
+                rationale_summary="Inspect logs for indicators of compromise and anomalous activity.",
+            )
+
+        return None
 
 
 class AnalystAgent(BaseAgent):

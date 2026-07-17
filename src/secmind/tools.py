@@ -194,4 +194,24 @@ class BanditTool(BaseTool):
 def default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(BanditTool())
+    try:
+        from secmind.tools_pentagi import pentagi_tools
+        for tool in pentagi_tools():
+            registry.register(tool)
+    except Exception as exc:
+        import sys
+        sys.stderr.write(f"Warning: Failed to load pentagi tools: {exc}\n")
+    try:
+        from secmind.skills_loader import SkillsLoader
+        import os
+        skills_dir = os.environ.get("SECMIND_SKILLS_DIR", "")
+        if skills_dir:
+            loader = SkillsLoader(skills_dir)
+            count = loader.register_all(registry)
+            if count > 0:
+                import sys
+                sys.stderr.write(f"Loaded {count} skill(s) from {skills_dir}\n")
+    except Exception as exc:
+        import sys
+        sys.stderr.write(f"Warning: Failed to load skills: {exc}\n")
     return registry

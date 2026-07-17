@@ -109,7 +109,7 @@ async def main() -> None:
 
     elapsed = time.monotonic() - start_time
     print(f"\n{'='*50}")
-    print(f"✅ 入库完成!")
+    print(f"[OK] 入库完成!")
     print(f"  文档总数: {total}")
     print(f"  耗时: {elapsed:.1f} 秒")
     print(f"  向量库: {qdrant_url}")

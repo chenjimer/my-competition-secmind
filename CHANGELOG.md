@@ -1,5 +1,42 @@
 # Changelog
 
+## Phase 1: Pentagi 工具整合 + 技能库加载器
+
+### 新增的文件（3个）
+- `src/secmind/sandbox.py` — Docker 沙箱执行器，隔离运行安全工具
+- `src/secmind/tools_pentagi.py` — 5 个渗透测试工具 (nmap/nuclei/gobuster/whatweb/searchsploit)
+- `src/secmind/skills_loader.py` — agentskills.io YAML 技能库解析器，支持动态加载自定义技能
+
+### 修改的文件（2个）
+- `src/secmind/tools.py` — `default_registry()` 自动注册 pentagi 工具和技能库
+- `src/secmind/agents.py` — PlannerAgent 移除 CODE_AUDIT-only 限制，支持 PENETRATION_TEST 和 LOG_ANALYSIS 默认计划
+
+### 新工具清单
+| 工具 | 风险等级 | 场景 | 说明 |
+|------|---------|------|------|
+| `nmap_scan` | R2 | penetration_test, log_analysis | 端口扫描 |
+| `nuclei_scan` | R2 | penetration_test | 漏洞模板扫描 |
+| `gobuster_dir` | R2 | penetration_test | 目录枚举 |
+| `whatweb_identify` | R1 | penetration_test, log_analysis | Web 技术识别 |
+| `searchsploit_query` | R1 | penetration_test | Exploit-DB 搜索 |
+
+### 沙箱执行架构
+```
+SecMind 编排器 → SandboxExecutor → Docker 容器 (临时, 用完即销毁)
+                                      ├── 资源限制 (CPU/内存)
+                                      ├── 网络隔离 (none / bridge)
+                                      ├── 超时自动销毁
+                                      └── 只读文件系统
+```
+
+### 技能库整合
+- `SkillsLoader` 解析 agentskills.io 标准 YAML 文件
+- 自动转换为 `ToolManifest` 并注册到 `ToolRegistry`
+- 通过 `SECMIND_SKILLS_DIR` 环境变量指定技能目录
+- 遵循 R0-R3 风险分级模型
+
+---
+
 ## Phase 0: Qdrant 向量库启用
 
 ### 修改的文件（3个）
