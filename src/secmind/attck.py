@@ -140,6 +140,10 @@ class AttackKnowledgeBase:
         """Return all top-level techniques (excluding sub-techniques)."""
         return self._format_techniques(self.mitre.get_techniques(include_subtechniques=False))
 
+    def get_all_techniques(self) -> list[dict[str, Any]]:
+        """Return all techniques including sub-techniques (~600 entries in total)."""
+        return self._format_techniques(self.mitre.get_techniques(include_subtechniques=True))
+
     def get_techniques_by_tactic(self, tactic_name: str) -> list[dict[str, Any]]:
         """Return techniques that belong to a given tactic (e.g. 'initial-access')."""
         domain = f"{self.domain}-attack"
@@ -271,6 +275,58 @@ class AttackKnowledgeBase:
             )
         return docs
 
+    def to_tactic_documents(
+        self,
+        tactics: list[dict[str, Any]] | None = None,
+        version: str | None = None,
+    ) -> list[MemoryDocument]:
+        """Convert ATT&CK tactics to MemoryDocuments.
+
+        Args:
+            tactics: List of tactic dicts (from get_tactics). If None, loads all.
+            version: ATT&CK version string.
+
+        Returns:
+            List of MemoryDocument objects for tactics.
+        """
+        if tactics is None:
+            tactics = self.get_tactics()
+        version_str = version or release_info.LATEST_VERSION
+
+        docs: list[MemoryDocument] = []
+        for t in tactics:
+            info_parts = [
+                f"Tactic: {t['attack_id']} - {t['name']}",
+                f"描述: {t['description']}",
+            ]
+
+            docs.append(
+                MemoryDocument(
+                    content="\n".join(info_parts),
+                    source="mitre-attack",
+                    version=version_str,
+                    kind="knowledge",
+                    metadata={
+                        "attack_id": t["attack_id"],
+                        "tactic_name": t["name"],
+                        "is_tactic": True,
+                    },
+                )
+            )
+        return docs
+
+    def all_documents(self, version: str | None = None) -> list[MemoryDocument]:
+        """Return all ATT&CK entries as MemoryDocuments: techniques, sub-techniques, and tactics.
+
+        This is the recommended method for full ingestion — it yields ~600+ documents.
+        """
+        version_str = version or release_info.LATEST_VERSION
+        all_techs = self.get_all_techniques()
+        all_tactics = self.get_tactics()
+        tech_docs = self.to_memory_documents(all_techs, version_str)
+        tactic_docs = self.to_tactic_documents(all_tactics, version_str)
+        return tech_docs + tactic_docs
+
     # ----------------------------------------------------------------
     # Summary
     # ----------------------------------------------------------------
@@ -279,10 +335,14 @@ class AttackKnowledgeBase:
         """Return a summary of the loaded ATT&CK data."""
         tactics = self.get_tactics()
         techniques = self.get_techniques()
+        all_techs = self.get_all_techniques()
+        sub_count = len(all_techs) - len(techniques)
         return {
             "domain": self.domain,
             "attack_version": release_info.LATEST_VERSION,
             "tactic_count": len(tactics),
             "technique_count": len(techniques),
+            "subtechnique_count": sub_count,
+            "total_count": len(all_techs) + len(tactics),
             "tactics": [t["name"] for t in tactics],
         }

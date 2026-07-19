@@ -142,7 +142,7 @@ async def test_idempotent_tool_failure_is_retried(settings) -> None:
 @pytest.mark.asyncio
 async def test_unsupported_scenario_produces_partial_report(settings) -> None:
     orchestrator, _, _ = controlled_orchestrator(settings, RiskLevel.R1)
-    state = await orchestrator.start(TaskRequest(objective="分析网络日志异常"), "log-run")
+    state = await orchestrator.start(TaskRequest(objective="分析网络流量异常"), "log-run")
     assert state.status == RunStatus.PARTIAL
     assert state.report is not None
     assert state.report.limitations

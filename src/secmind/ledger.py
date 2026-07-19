@@ -48,6 +48,23 @@ class RunRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class QueryLogRow(Base):
+    """Query history log — records every knowledge retrieval query along with its results."""
+
+    __tablename__ = "query_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    query_text: Mapped[str] = mapped_column(Text)
+    query_vector_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    top_k: Mapped[int] = mapped_column(Integer, default=5)
+    hits_json: Mapped[str] = mapped_column(Text)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_model: Mapped[str] = mapped_column(String(100), default="")
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 def redact(value: Any) -> Any:
     """Redact common secret fields before they enter durable logs."""
     if isinstance(value, dict):
@@ -185,6 +202,64 @@ class LedgerStore:
             for event in self.events(run_id, limit=1_000_000):
                 output.write(event.model_dump_json() + "\n")
         return destination
+
+    # ----------------------------------------------------------------
+    # Query logging
+    # ----------------------------------------------------------------
+
+    def log_query(
+        self,
+        query_text: str,
+        hits_json: str,
+        hit_count: int,
+        *,
+        run_id: str | None = None,
+        query_vector_json: str | None = None,
+        top_k: int = 5,
+        embedding_model: str = "",
+        duration_ms: int | None = None,
+    ) -> int:
+        """Record a knowledge retrieval query and its results in the query log."""
+        with Session(self.engine) as session:
+            row = QueryLogRow(
+                run_id=run_id,
+                query_text=query_text,
+                query_vector_json=query_vector_json,
+                top_k=top_k,
+                hits_json=hits_json,
+                hit_count=hit_count,
+                embedding_model=embedding_model,
+                timestamp=datetime.now(UTC),
+                duration_ms=duration_ms,
+            )
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def query_logs(
+        self,
+        limit: int = 100,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent query logs, optionally filtered by run_id."""
+        with Session(self.engine) as session:
+            q = select(QueryLogRow).order_by(QueryLogRow.timestamp.desc())
+            if run_id is not None:
+                q = q.where(QueryLogRow.run_id == run_id)
+            rows = session.scalars(q.limit(limit)).all()
+            return [
+                {
+                    "id": r.id,
+                    "run_id": r.run_id,
+                    "query_text": r.query_text,
+                    "hit_count": r.hit_count,
+                    "hits": json.loads(r.hits_json),
+                    "embedding_model": r.embedding_model,
+                    "timestamp": r.timestamp.isoformat(),
+                    "duration_ms": r.duration_ms,
+                }
+                for r in rows
+            ]
 
     @staticmethod
     def _to_event(row: EventRow) -> LedgerEvent:

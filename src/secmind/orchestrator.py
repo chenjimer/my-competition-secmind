@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import time as time_module
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict, cast
 from uuid import uuid4
@@ -246,6 +248,7 @@ class SecMindOrchestrator:
     async def _retrieve_context(self, value: GraphState) -> GraphState:
         state = self._state(value)
         hit_count = 0
+        query_start = time_module.monotonic()
 
         if self.memory_store is not None:
             query_parts = [state.task.objective]
@@ -254,18 +257,48 @@ class SecMindOrchestrator:
             if state.task.target_scope:
                 query_parts.append(", ".join(state.task.target_scope))
             query_text = " ".join(query_parts)
+            embedding_model = ""
 
             try:
                 if not self.settings.demo_mode and self.settings.qwen_api_key:
                     vectors = await self.gateway.embeddings([query_text])
                     query_vector = vectors[0]
+                    embedding_model = self.settings.embedding_model
                 else:
                     import random
                     query_vector = [random.random() for _ in range(self.memory_store.vector_size)]
+                    embedding_model = "random-fallback"
 
                 hits = self.memory_store.search(query_vector, top_k=5)
                 state.knowledge_hits = hits
                 hit_count = len(hits)
+                query_duration = int((time_module.monotonic() - query_start) * 1000)
+
+                # 留存查询记录
+                try:
+                    hits_data = [
+                        {
+                            "memory_id": h.memory_id,
+                            "content": h.content,
+                            "source": h.source,
+                            "version": h.version,
+                            "confidence": h.confidence,
+                            "metadata": h.metadata,
+                        }
+                        for h in hits
+                    ]
+                    self.ledger.log_query(
+                        query_text=query_text,
+                        hits_json=json.dumps(hits_data, ensure_ascii=False),
+                        hit_count=hit_count,
+                        run_id=state.run_id,
+                        query_vector_json=json.dumps(query_vector) if not self.settings.demo_mode else None,
+                        top_k=5,
+                        embedding_model=embedding_model,
+                        duration_ms=query_duration,
+                    )
+                except Exception:
+                    pass  # 查询日志不应影响主流程
 
                 state.decisions.append(
                     DecisionRecord(

@@ -10,6 +10,7 @@ from secmind.schemas import (
     AgentState,
     DecisionRecord,
     Finding,
+    KnowledgeHit,
     PlanStep,
     RiskLevel,
     RunStatus,
@@ -72,6 +73,19 @@ class PlannerAgent(BaseAgent):
     name = "planner"
     model_role = "planner"
 
+    @staticmethod
+    def _build_knowledge_context(state: AgentState) -> str:
+        """Format ATT&CK knowledge hits into a plain-text context block for the planner prompt."""
+        if not state.knowledge_hits:
+            return ""
+        lines: list[str] = []
+        for hit in state.knowledge_hits:
+            attack_id = hit.metadata.get("attack_id", "")
+            name = hit.metadata.get("technique_name", "")
+            desc = hit.content[:300].replace("\n", " ")  # 截断长内容
+            lines.append(f"- {attack_id} {name}: {desc}")
+        return "\n".join(lines)
+
     async def run(self, state: AgentState) -> AgentState:
         default = self._create_default_plan(state)
 
@@ -89,6 +103,14 @@ class PlannerAgent(BaseAgent):
             return state
 
         if not self.gateway.settings.demo_mode:
+            knowledge_ctx = self._build_knowledge_context(state)
+            system_prompt = "You are SecMind Planner. Return only schema-valid JSON."
+            if knowledge_ctx:
+                system_prompt += (
+                    "\n\nRelevant ATT&CK knowledge for context:\n"
+                    f"{knowledge_ctx}\n\n"
+                    "Use this knowledge to inform the plan steps where applicable."
+                )
             prompt = (
                 f"Create a bounded {state.scenario.value} plan. "
                 f"Do not include hidden reasoning; provide a short rationale summary.\n"
@@ -98,7 +120,7 @@ class PlannerAgent(BaseAgent):
             try:
                 output, meta = await self.gateway.structured(
                     role=self.model_role,
-                    system_prompt="You are SecMind Planner. Return only schema-valid JSON.",
+                    system_prompt=system_prompt,
                     user_prompt=prompt,
                     output_model=PlanOutput,
                     prompt_version=self.prompt_version,
@@ -184,7 +206,7 @@ class PlannerAgent(BaseAgent):
                         step_id="log-inspect",
                         objective="Analyze log files for suspicious patterns and anomalies.",
                         agent_role="executor",
-                        tool_candidates=[],
+                        tool_candidates=["log_inspector"],
                         inputs={"target": "."},
                         success_criteria=[
                             "Log entries are parsed and categorized",
@@ -204,6 +226,45 @@ class AnalystAgent(BaseAgent):
     name = "analyst"
     model_role = "planner"
 
+    @staticmethod
+    def _build_attack_keywords(state: AgentState) -> list[tuple[str, KnowledgeHit]]:
+        """Build a list of (keyword, hit) pairs from knowledge hits for fuzzy matching."""
+        pairs: list[tuple[str, KnowledgeHit]] = []
+        seen = set()
+        for hit in state.knowledge_hits:
+            attack_id = hit.metadata.get("attack_id", "")
+            technique_name = hit.metadata.get("technique_name", "")
+            content_lower = hit.content.lower()
+            # 用 ATT&CK ID、技术名、关键词做匹配依据
+            tokens = [t for t in [attack_id, technique_name] if t]
+            for token in tokens:
+                key = token.lower()
+                if key and key not in seen:
+                    pairs.append((key, hit))
+                    seen.add(key)
+            # 从 content 提取简短关键词做辅助匹配
+            for keyword in ("sql", "xss", "injection", "bypass", "privilege", "escalation", "discovery"):
+                if keyword in content_lower and keyword not in seen:
+                    pairs.append((keyword, hit))
+                    seen.add(keyword)
+        return pairs
+
+    @staticmethod
+    def _match_finding_to_attack(
+        finding: Finding,
+        keyword_pairs: list[tuple[str, KnowledgeHit]],
+    ) -> list[str]:
+        """Return ATT&CK IDs that match a finding based on title/description keywords."""
+        haystack = f"{finding.title} {finding.description}".lower()
+        matched: list[str] = []
+        seen_id = set()
+        for keyword, hit in keyword_pairs:
+            attack_id = hit.metadata.get("attack_id", "")
+            if keyword in haystack and attack_id and attack_id not in seen_id:
+                matched.append(attack_id)
+                seen_id.add(attack_id)
+        return matched
+
     async def run(self, state: AgentState) -> AgentState:
         if not state.observations:
             return state
@@ -211,13 +272,30 @@ class AnalystAgent(BaseAgent):
         if latest.status == ToolStatus.SUCCESS:
             state.evidence.extend(latest.evidence)
             for item in latest.data.get("findings", []):
-                state.findings.append(Finding.model_validate(item))
+                finding = Finding.model_validate(item)
+                # 交叉关联 ATT&CK 知识
+                if state.knowledge_hits:
+                    keywords = self._build_attack_keywords(state)
+                    matched_ids = self._match_finding_to_attack(finding, keywords)
+                    if matched_ids:
+                        raw = {"attck_ids": matched_ids}
+                        finding.raw.update(raw)
+                state.findings.append(finding)
+
+            ref_count = sum(
+                1 for f in state.findings[-len(latest.data.get("findings", [])):]
+                if "attck_ids" in f.raw
+            )
+            rationale = latest.summary
+            if ref_count:
+                rationale += f" | {ref_count} finding(s) cross-referenced to ATT&CK"
+
             state.decisions.append(
                 DecisionRecord(
                     decision="tool_result_normalized",
-                    rationale_summary=latest.summary,
+                    rationale_summary=rationale,
                     evidence_ids=[item.evidence_id for item in latest.evidence],
-                    policy_ids=["EVIDENCE-REQUIRED-V1"],
+                    policy_ids=["EVIDENCE-REQUIRED-V1", "RAG-CITATION-V1"],
                     model_id="deterministic-evidence-analyzer",
                 )
             )
@@ -263,6 +341,29 @@ class ReporterAgent(BaseAgent):
     name = "reporter"
     model_role = "planner"
 
+    @staticmethod
+    def _build_knowledge_summary(state: AgentState) -> str:
+        """Build a human-readable block listing ATT&CK knowledge sources referenced in the run."""
+        if not state.knowledge_hits:
+            return ""
+        lines: list[str] = []
+        seen_id = set()
+        for hit in state.knowledge_hits:
+            attack_id = hit.metadata.get("attack_id", "")
+            if attack_id and attack_id not in seen_id:
+                name = hit.metadata.get("technique_name", "")
+                lines.append(f"  - {attack_id} {name}".strip())
+                seen_id.add(attack_id)
+        # 也从 finding 的 attck_ids 收集
+        for finding in state.findings:
+            for aid in finding.raw.get("attck_ids", []):
+                if aid not in seen_id:
+                    lines.append(f"  - {aid}")
+                    seen_id.add(aid)
+        if not lines:
+            return ""
+        return "ATT&CK knowledge referenced:\n" + "\n".join(lines)
+
     async def run(self, state: AgentState) -> AgentState:
         successful = any(item.status == ToolStatus.SUCCESS for item in state.observations)
         if state.status in {RunStatus.DENIED, RunStatus.FAILED}:
@@ -278,13 +379,20 @@ class ReporterAgent(BaseAgent):
             limitations.append("No input artifacts were supplied; the workspace may contain no analyzable code.")
         if state.last_error:
             limitations.append(state.last_error)
+
+        # 构建带有 ATT&CK 引用的报告摘要
+        knowledge_summary = self._build_knowledge_summary(state)
         if successful:
+            attck_ref_count = sum(1 for f in state.findings if "attck_ids" in f.raw)
             summary = (
                 f"Code audit completed with {len(state.findings)} finding(s), "
                 f"supported by {len(state.evidence)} evidence record(s)."
             )
+            if attck_ref_count:
+                summary += f" {attck_ref_count} finding(s) cross-referenced to ATT&CK."
         else:
             summary = "The task ended without a successful security-tool observation."
+
         state.status = final_status
         state.report = AgentReport(
             run_id=state.run_id,
@@ -295,4 +403,16 @@ class ReporterAgent(BaseAgent):
             evidence=state.evidence,
             limitations=limitations,
         )
+
+        # 将 ATT&CK 知识引用写入 DecisionRecord 供展示
+        if knowledge_summary:
+            state.decisions.append(
+                DecisionRecord(
+                    decision="knowledge_citation",
+                    rationale_summary=knowledge_summary,
+                    policy_ids=["RAG-CITATION-V1"],
+                    model_id="deterministic-citation",
+                )
+            )
+
         return state

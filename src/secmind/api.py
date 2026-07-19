@@ -144,6 +144,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service.submit_approval(run_id, response)
         return {"schema_version": "1.0", "run_id": run_id, "accepted": True}
 
+    @app.get("/api/v1/query-logs")
+    async def get_query_logs(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """返回知识检索的查询日志记录，每一条包含问题和结果。"""
+        logs = service.ledger.query_logs(limit=limit, run_id=run_id)
+        return {
+            "schema_version": "1.0",
+            "total": len(logs),
+            "logs": logs,
+        }
+
     @app.websocket("/api/v1/runs/{run_id}/events")
     async def events_socket(websocket: WebSocket, run_id: str, after_sequence: int = 0) -> None:
         if service.ledger.load_state(run_id) is None:
