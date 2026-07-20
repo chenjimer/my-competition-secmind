@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient, models
@@ -33,7 +33,9 @@ class QdrantVectorStore:
         self.collection_name = collection_name
         self.vector_size = vector_size
 
-    def ensure_collection(self) -> None:
+    def ensure_collection(self, *, recreate: bool = False) -> None:
+        if recreate and self.client.collection_exists(self.collection_name):
+            self.client.delete_collection(self.collection_name)
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
                 collection_name=self.collection_name,
@@ -42,6 +44,60 @@ class QdrantVectorStore:
                     distance=models.Distance.COSINE,
                 ),
             )
+            return
+        info = self.client.get_collection(self.collection_name)
+        vectors = info.config.params.vectors
+        actual_size = vectors.size if isinstance(vectors, models.VectorParams) else None
+        if actual_size != self.vector_size:
+            raise ValueError(
+                f"Collection {self.collection_name!r} has vector size {actual_size}, "
+                f"expected {self.vector_size}"
+            )
+
+    def collection_info(self) -> Any:
+        return self.client.get_collection(self.collection_name)
+
+    def get(self, memory_id: str) -> MemoryDocument | None:
+        points = self.client.retrieve(
+            collection_name=self.collection_name,
+            ids=[memory_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points or not points[0].payload:
+            return None
+        return MemoryDocument.model_validate(points[0].payload)
+
+    def update_payload(self, memory_id: str, payload: dict[str, Any]) -> None:
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload=payload,
+            points=[memory_id],
+            wait=True,
+        )
+
+    def scroll(
+        self,
+        *,
+        limit: int = 100,
+        filters: dict[str, str] | None = None,
+    ) -> list[MemoryDocument]:
+        query_filter = None
+        if filters:
+            query_filter = models.Filter(
+                must=[
+                    models.FieldCondition(key=key, match=models.MatchValue(value=value))
+                    for key, value in filters.items()
+                ]
+            )
+        points, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            limit=limit,
+            scroll_filter=query_filter,
+            with_payload=True,
+            with_vectors=False,
+        )
+        return [MemoryDocument.model_validate(point.payload) for point in points if point.payload]
 
     def delete(self, memory_id: str) -> None:
         self.client.delete(
@@ -73,7 +129,7 @@ class QdrantVectorStore:
         if len(documents) != len(vectors):
             raise ValueError(f"Document count ({len(documents)}) does not match vector count ({len(vectors)})")
         validated: list[models.PointStruct] = []
-        for doc, vec in zip(documents, vectors):
+        for doc, vec in zip(documents, vectors, strict=True):
             if len(vec) != self.vector_size:
                 raise ValueError(f"Expected vector size {self.vector_size}, got {len(vec)}")
             if doc.kind == "episodic" and not doc.verified:
@@ -83,6 +139,10 @@ class QdrantVectorStore:
             )
         self.ensure_collection()
         self.client.upsert(collection_name=self.collection_name, points=validated, wait=True)
+
+    @staticmethod
+    def stable_memory_id(source: str, external_id: str, kind: str = "knowledge") -> str:
+        return str(uuid5(NAMESPACE_URL, f"{source}:{external_id}:{kind}"))
 
     def search(
         self,

@@ -20,6 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]
 qdrant = ["qdrant-client>=1.13,<2"]
+knowledge = [
+  "mitreattack-python>=6.1,<7",
+  "pooch>=1.8,<2",
+]
 dev = [
   "coverage[toml]>=7.6,<8",
   "mypy>=1.14,<2",
@@ -54,6 +58,7 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "examples/*.py" = ["S602"]
 "src/secmind/api.py" = ["S104"]
+"scripts/ingest_knowledge.py" = ["ASYNC240", "S311"]
 
 [tool.coverage.run]
 source = ["secmind"]

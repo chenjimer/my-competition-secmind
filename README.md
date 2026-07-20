@@ -99,7 +99,18 @@ $env:PYTHONPATH="src"; python scripts/ingest_knowledge.py --clear
 
 # 仅预览不写入
 $env:PYTHONPATH="src"; python scripts/ingest_knowledge.py --dry-run
+
+# 低成本验证：只预览 Enterprise 前20条
+$env:PYTHONPATH="src"; python scripts/ingest_knowledge.py --domain enterprise --limit 20 --dry-run
+
+# 三域入库；同一参数重跑时从 data/ingest_checkpoint.json 断点继续
+$env:PYTHONPATH="src"; python scripts/ingest_knowledge.py `
+  --domain enterprise --domain mobile --domain ics
 ```
+
+ATT&CK 文档 ID 由“域 + ATT&CK ID + 类型”稳定生成，因此重复执行使用 Qdrant upsert，
+不会产生重复知识。更换 Embedding 模型、向量维度或域组合时会自动使用新的 checkpoint 指纹；
+使用 `--clear` 会清空 Collection 和 checkpoint。
 
 ### 语义搜索
 

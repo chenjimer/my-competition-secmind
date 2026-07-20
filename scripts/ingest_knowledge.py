@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import sys
 import time
@@ -53,7 +54,25 @@ async def main() -> None:
         action="store_true",
         help="仅预览文档数量，不实际写入 Qdrant",
     )
+    parser.add_argument(
+        "--domain",
+        action="append",
+        choices=("enterprise", "mobile", "ics"),
+        help="ATT&CK 域，可重复指定；默认 enterprise",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="只处理前 N 条，用于低成本链路验证",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="data/ingest_checkpoint.json",
+        help="断点记录文件",
+    )
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit 必须是正整数")
 
     settings = get_settings()
 
@@ -75,17 +94,30 @@ async def main() -> None:
     print(f"[配置] Demo 模式: {settings.demo_mode}")
     print(f"[配置] 嵌入模型: {settings.embedding_model}")
     if settings.qwen_api_key:
-        print(f"[配置] API Key: 已配置 [OK]")
+        print("[配置] API Key: 已配置 [OK]")
 
     # ========== 初始化组件 ==========
-    print("\n[初始化] ATT&CK 知识库...")
-    kb = AttackKnowledgeBase()
-    summary = kb.summary()
-    print(f"  ATT&CK 版本: {summary['attack_version']}")
-    print(f"  战术阶段: {summary['tactic_count']}")
-    print(f"  顶层技术: {summary['technique_count']}")
-    print(f"  子技术: {summary['subtechnique_count']}")
-    print(f"  合计: {summary['total_count']} 条")
+    selected_domains = tuple(dict.fromkeys(args.domain or ["enterprise"]))
+    print(f"\n[初始化] ATT&CK 知识库: {', '.join(selected_domains)}")
+    all_docs = []
+    summaries = []
+    for domain in selected_domains:
+        kb = AttackKnowledgeBase(domain=domain)
+        summary = kb.summary()
+        summaries.append(summary)
+        domain_docs = kb.all_documents()
+        all_docs.extend(domain_docs)
+        print(
+            f"  {domain}: v{summary['attack_version']}, "
+            f"技术/子技术 {len(domain_docs) - summary['tactic_count']} 条, "
+            f"战术 {summary['tactic_count']} 条"
+        )
+    if args.limit is not None:
+        all_docs = all_docs[: args.limit]
+    print(f"  本次候选文档: {len(all_docs)} 条")
+    if args.dry_run:
+        print("\n[Dry-Run] 预览完成，未连接 Qdrant、未调用 Embedding、未写入数据。")
+        return
 
     print("\n[初始化] Qdrant 向量库...")
     store = QdrantVectorStore(
@@ -102,6 +134,7 @@ async def main() -> None:
         count = store.client.count(collection_name=store.collection_name).count
         store.client.delete_collection(store.collection_name)
         store.ensure_collection()
+        Path(args.checkpoint).unlink(missing_ok=True)
         print(f"  已删除 {count} 条旧数据，重新创建集合")
 
     # 初始化千问 Embedding 网关（使用真实语意嵌入模型）
@@ -112,20 +145,24 @@ async def main() -> None:
         print(f"\n[初始化] 千问 Embedding 网关 — 模型: {settings.embedding_model}")
         gateway = QwenGateway(settings)
 
-    # ========== 获取全部 ATT&CK 条目 ==========
-    print("\n[处理] 获取全部 ATT&CK 条目（技术 + 子技术 + 战术）...")
-    all_docs = kb.all_documents()
-    print(f"  共 {len(all_docs)} 条文档")
-    print(f"  - 技术/子技术: {len(all_docs) - summary['tactic_count']} 条")
-    print(f"  - 战术阶段: {summary['tactic_count']} 条")
-
-    # ========== Dry-run：仅预览不写入 ==========
-    if args.dry_run:
-        print(f"\n[Dry-Run] 预览完成，未写入 Qdrant。去掉 --dry-run 执行实际入库。")
-        return
+    # ========== 断点恢复 ==========
+    checkpoint_path = Path(args.checkpoint)
+    completed_ids: set[str] = set()
+    checkpoint_fingerprint = {
+        "domains": list(selected_domains),
+        "embedding_model": settings.embedding_model,
+        "vector_size": settings.qdrant_vector_size,
+    }
+    if checkpoint_path.exists():
+        checkpoint_data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint_data.get("fingerprint") == checkpoint_fingerprint:
+            completed_ids = set(checkpoint_data.get("completed_ids", []))
+    pending_docs = [doc for doc in all_docs if doc.memory_id not in completed_ids]
+    if completed_ids:
+        print(f"\n[恢复] 已完成 {len(completed_ids)} 条，本次待处理 {len(pending_docs)} 条")
 
     # ========== 分批向量化并写入 ==========
-    total = len(all_docs)
+    total = len(pending_docs)
     batches = math.ceil(total / BATCH_SIZE)
     print(f"\n[写入] 分 {batches} 批写入 Qdrant (每批 {BATCH_SIZE} 条)")
 
@@ -134,7 +171,7 @@ async def main() -> None:
 
     start_time = time.monotonic()
     for i in range(0, total, BATCH_SIZE):
-        batch_docs = all_docs[i : i + BATCH_SIZE]
+        batch_docs = pending_docs[i : i + BATCH_SIZE]
         batch_texts = [doc.content for doc in batch_docs]
         batch_num = i // BATCH_SIZE + 1
 
@@ -153,21 +190,33 @@ async def main() -> None:
             vectors = [
                 [random.random() for _ in range(settings.qdrant_vector_size)] for _ in batch_docs
             ]
-            print(f"    向量生成完成 (随机向量 — demo 模式)")
+            print("    向量生成完成 (随机向量 — demo 模式)")
 
         store.batch_upsert(batch_docs, vectors)
-        print(f"    写入 Qdrant 完成")
+        completed_ids.update(doc.memory_id for doc in batch_docs)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_checkpoint = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+        temporary_checkpoint.write_text(
+            json.dumps(
+                {"fingerprint": checkpoint_fingerprint, "completed_ids": sorted(completed_ids)},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary_checkpoint.replace(checkpoint_path)
+        print("    写入 Qdrant 完成")
         # 避免 API 限流
         if gateway and not settings.demo_mode:
             await asyncio.sleep(0.3)
 
     elapsed = time.monotonic() - start_time
     print(f"\n{'=' * 50}")
-    print(f"[OK] 入库完成!")
-    print(f"  ATT&CK 版本: {summary['attack_version']}")
-    print(f"  文档总数: {total}")
-    print(f"    ├─ 技术/子技术: {total - summary['tactic_count']} 条")
-    print(f"    └─ 战术阶段: {summary['tactic_count']} 条")
+    print("[OK] 入库完成!")
+    versions = ", ".join(f"{item['domain']}:v{item['attack_version']}" for item in summaries)
+    print(f"  ATT&CK 版本: {versions}")
+    print(f"  本次新增: {total}")
+    print(f"  checkpoint累计: {len(completed_ids)}")
     print(f"  嵌入模型: {settings.embedding_model if not settings.demo_mode else '(随机向量 — demo 模式)'}")
     print(f"  耗时: {elapsed:.1f} 秒")
     print(f"  向量库: {qdrant_url}")
