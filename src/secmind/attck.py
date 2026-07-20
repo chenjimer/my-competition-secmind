@@ -19,7 +19,7 @@ import pooch
 from mitreattack import release_info
 from mitreattack.stix20 import MitreAttackData
 
-from secmind.memory import MemoryDocument
+from secmind.memory import MemoryDocument, QdrantVectorStore
 
 STIX_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "attack-stix"
 
@@ -260,6 +260,9 @@ class AttackKnowledgeBase:
 
             docs.append(
                 MemoryDocument(
+                    memory_id=QdrantVectorStore.stable_memory_id(
+                        f"mitre-attack-{self.domain}", t["attack_id"], "technique"
+                    ),
                     content="\n".join(info_parts),
                     source="mitre-attack",
                     version=version_str,
@@ -302,6 +305,9 @@ class AttackKnowledgeBase:
 
             docs.append(
                 MemoryDocument(
+                    memory_id=QdrantVectorStore.stable_memory_id(
+                        f"mitre-attack-{self.domain}", t["attack_id"], "tactic"
+                    ),
                     content="\n".join(info_parts),
                     source="mitre-attack",
                     version=version_str,
